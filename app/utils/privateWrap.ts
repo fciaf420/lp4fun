@@ -113,6 +113,176 @@ export function buildInitPositionIx(
     });
 }
 
+// ----- Liquidity / claim / close -----
+
+/** Common accounts for the wrapper's add_liquidity / remove_liquidity ixs. */
+export interface ManageLiquidityAccounts {
+    payer: PublicKey;
+    position: PublicKey;
+    lbPair: PublicKey;
+    binArrayBitmapExtension: PublicKey; // pass METEORA_DLMM_PROGRAM_ID if absent
+    userTokenX: PublicKey;
+    userTokenY: PublicKey;
+    reserveX: PublicKey;
+    reserveY: PublicKey;
+    tokenXMint: PublicKey;
+    tokenYMint: PublicKey;
+    binArrayLower: PublicKey;
+    binArrayUpper: PublicKey;
+    tokenXProgram: PublicKey; // SPL Token or Token-2022
+    tokenYProgram: PublicKey;
+}
+
+function manageLiquidityKeys(nonce: Uint8Array, a: ManageLiquidityAccounts) {
+    const [positionOwner] = derivePositionOwner(nonce);
+    const eventAuthority = deriveMeteoraEventAuthority();
+    return [
+        {pubkey: a.payer, isSigner: true, isWritable: true},
+        {pubkey: positionOwner, isSigner: false, isWritable: false},
+        {pubkey: a.position, isSigner: false, isWritable: true},
+        {pubkey: a.lbPair, isSigner: false, isWritable: true},
+        {pubkey: a.binArrayBitmapExtension, isSigner: false, isWritable: true},
+        {pubkey: a.userTokenX, isSigner: false, isWritable: true},
+        {pubkey: a.userTokenY, isSigner: false, isWritable: true},
+        {pubkey: a.reserveX, isSigner: false, isWritable: true},
+        {pubkey: a.reserveY, isSigner: false, isWritable: true},
+        {pubkey: a.tokenXMint, isSigner: false, isWritable: false},
+        {pubkey: a.tokenYMint, isSigner: false, isWritable: false},
+        {pubkey: a.binArrayLower, isSigner: false, isWritable: true},
+        {pubkey: a.binArrayUpper, isSigner: false, isWritable: true},
+        {pubkey: a.tokenXProgram, isSigner: false, isWritable: false},
+        {pubkey: a.tokenYProgram, isSigner: false, isWritable: false},
+        {pubkey: eventAuthority, isSigner: false, isWritable: false},
+        {pubkey: METEORA_DLMM_PROGRAM_ID, isSigner: false, isWritable: false},
+    ];
+}
+
+/**
+ * `add_liquidity(nonce, liquidity_parameter)` — `liquidityParameter` is the
+ * raw borsh-serialized `LiquidityParameterByStrategy` from the Meteora IDL,
+ * built client-side (e.g. via the @meteora-ag/dlmm SDK) and passed opaque.
+ */
+export function buildAddLiquidityIx(
+    args: { nonce: Uint8Array; liquidityParameter: Buffer },
+    accounts: ManageLiquidityAccounts
+): TransactionInstruction {
+    if (args.nonce.length !== 32) throw new Error('nonce must be 32 bytes');
+    const data = Buffer.alloc(8 + 32 + 4 + args.liquidityParameter.length);
+    anchorSighash('add_liquidity').copy(data, 0);
+    Buffer.from(args.nonce).copy(data, 8);
+    data.writeUInt32LE(args.liquidityParameter.length, 8 + 32);
+    args.liquidityParameter.copy(data, 8 + 32 + 4);
+    return new TransactionInstruction({
+        programId: PRIVATE_WRAP_PROGRAM_ID,
+        keys: manageLiquidityKeys(args.nonce, accounts),
+        data,
+    });
+}
+
+export function buildRemoveLiquidityIx(
+    args: { nonce: Uint8Array; fromBinId: number; toBinId: number; bpsToRemove: number },
+    accounts: ManageLiquidityAccounts
+): TransactionInstruction {
+    if (args.nonce.length !== 32) throw new Error('nonce must be 32 bytes');
+    const data = Buffer.alloc(8 + 32 + 4 + 4 + 2);
+    anchorSighash('remove_liquidity').copy(data, 0);
+    Buffer.from(args.nonce).copy(data, 8);
+    data.writeInt32LE(args.fromBinId, 8 + 32);
+    data.writeInt32LE(args.toBinId, 8 + 32 + 4);
+    data.writeUInt16LE(args.bpsToRemove, 8 + 32 + 8);
+    return new TransactionInstruction({
+        programId: PRIVATE_WRAP_PROGRAM_ID,
+        keys: manageLiquidityKeys(args.nonce, accounts),
+        data,
+    });
+}
+
+export interface ClaimFeesAccounts {
+    payer: PublicKey;
+    position: PublicKey;
+    lbPair: PublicKey;
+    binArrayLower: PublicKey;
+    binArrayUpper: PublicKey;
+    reserveX: PublicKey;
+    reserveY: PublicKey;
+    /** Fresh token accounts — do not point at the leader's main wallet. */
+    userTokenX: PublicKey;
+    userTokenY: PublicKey;
+    tokenXMint: PublicKey;
+    tokenYMint: PublicKey;
+    tokenProgram: PublicKey;
+}
+
+export function buildClaimFeesIx(
+    args: { nonce: Uint8Array },
+    a: ClaimFeesAccounts
+): TransactionInstruction {
+    if (args.nonce.length !== 32) throw new Error('nonce must be 32 bytes');
+    const [positionOwner] = derivePositionOwner(args.nonce);
+    const eventAuthority = deriveMeteoraEventAuthority();
+    const data = Buffer.alloc(8 + 32);
+    anchorSighash('claim_fees').copy(data, 0);
+    Buffer.from(args.nonce).copy(data, 8);
+    return new TransactionInstruction({
+        programId: PRIVATE_WRAP_PROGRAM_ID,
+        keys: [
+            {pubkey: a.payer, isSigner: true, isWritable: true},
+            {pubkey: positionOwner, isSigner: false, isWritable: false},
+            {pubkey: a.lbPair, isSigner: false, isWritable: false},
+            {pubkey: a.position, isSigner: false, isWritable: true},
+            {pubkey: a.binArrayLower, isSigner: false, isWritable: true},
+            {pubkey: a.binArrayUpper, isSigner: false, isWritable: true},
+            {pubkey: a.reserveX, isSigner: false, isWritable: true},
+            {pubkey: a.reserveY, isSigner: false, isWritable: true},
+            {pubkey: a.userTokenX, isSigner: false, isWritable: true},
+            {pubkey: a.userTokenY, isSigner: false, isWritable: true},
+            {pubkey: a.tokenXMint, isSigner: false, isWritable: false},
+            {pubkey: a.tokenYMint, isSigner: false, isWritable: false},
+            {pubkey: a.tokenProgram, isSigner: false, isWritable: false},
+            {pubkey: eventAuthority, isSigner: false, isWritable: false},
+            {pubkey: METEORA_DLMM_PROGRAM_ID, isSigner: false, isWritable: false},
+        ],
+        data,
+    });
+}
+
+export interface ClosePositionAccounts {
+    payer: PublicKey;
+    position: PublicKey;
+    lbPair: PublicKey;
+    binArrayLower: PublicKey;
+    binArrayUpper: PublicKey;
+    /** Fresh wallet — receives reclaimed rent. Don't use the leader's main wallet. */
+    rentReceiver: PublicKey;
+}
+
+export function buildClosePositionIx(
+    args: { nonce: Uint8Array },
+    a: ClosePositionAccounts
+): TransactionInstruction {
+    if (args.nonce.length !== 32) throw new Error('nonce must be 32 bytes');
+    const [positionOwner] = derivePositionOwner(args.nonce);
+    const eventAuthority = deriveMeteoraEventAuthority();
+    const data = Buffer.alloc(8 + 32);
+    anchorSighash('close_position').copy(data, 0);
+    Buffer.from(args.nonce).copy(data, 8);
+    return new TransactionInstruction({
+        programId: PRIVATE_WRAP_PROGRAM_ID,
+        keys: [
+            {pubkey: a.payer, isSigner: true, isWritable: true},
+            {pubkey: positionOwner, isSigner: false, isWritable: false},
+            {pubkey: a.position, isSigner: false, isWritable: true},
+            {pubkey: a.lbPair, isSigner: false, isWritable: false},
+            {pubkey: a.binArrayLower, isSigner: false, isWritable: true},
+            {pubkey: a.binArrayUpper, isSigner: false, isWritable: true},
+            {pubkey: a.rentReceiver, isSigner: false, isWritable: true},
+            {pubkey: eventAuthority, isSigner: false, isWritable: false},
+            {pubkey: METEORA_DLMM_PROGRAM_ID, isSigner: false, isWritable: false},
+        ],
+        data,
+    });
+}
+
 // ----- Lookup -----
 
 /**
