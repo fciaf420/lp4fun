@@ -133,6 +133,84 @@ pub mod dlmm_private_wrap {
         Ok(())
     }
 
+    /// Add liquidity through Meteora's v2 entrypoint, which supports
+    /// Token-2022 mints. Bin arrays + any transfer-hook accounts come
+    /// through `ctx.remaining_accounts` and are forwarded verbatim.
+    ///
+    /// `liquidity_parameter` is still the borsh-serialized
+    /// `LiquidityParameterByStrategy` (97 bytes). `remaining_accounts_info`
+    /// is the borsh-serialized `RemainingAccountsInfo` (4-byte slice count
+    /// + slices), built client-side and passed opaque.
+    pub fn add_liquidity_v2<'info>(
+        ctx: Context<'_, '_, 'info, 'info, ManageLiquidityV2<'info>>,
+        nonce: [u8; 32],
+        liquidity_parameter: Vec<u8>,
+        remaining_accounts_info: Vec<u8>,
+    ) -> Result<()> {
+        let bump = ctx.bumps.position_owner;
+        let signer_seeds: &[&[&[u8]]] = &[&[POSITION_OWNER_SEED, &nonce, &[bump]]];
+
+        let mut data = sighash("global", "add_liquidity_by_strategy2").to_vec();
+        data.extend_from_slice(&liquidity_parameter);
+        data.extend_from_slice(&remaining_accounts_info);
+
+        let mut accounts = vec![
+            AccountMeta::new(ctx.accounts.position.key(), false),
+            AccountMeta::new(ctx.accounts.lb_pair.key(), false),
+            AccountMeta::new(ctx.accounts.bin_array_bitmap_extension.key(), false),
+            AccountMeta::new(ctx.accounts.user_token_x.key(), false),
+            AccountMeta::new(ctx.accounts.user_token_y.key(), false),
+            AccountMeta::new(ctx.accounts.reserve_x.key(), false),
+            AccountMeta::new(ctx.accounts.reserve_y.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.token_x_mint.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.token_y_mint.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.position_owner.key(), true),
+            AccountMeta::new_readonly(ctx.accounts.token_x_program.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.token_y_program.key(), false),
+            AccountMeta::new_readonly(ctx.accounts.event_authority.key(), false),
+            AccountMeta::new_readonly(meteora::ID, false),
+        ];
+
+        // Forward remaining accounts (bin_array_lower, bin_array_upper, plus
+        // any transfer-hook accounts) with the writability the outer tx
+        // already has on each.
+        for ai in ctx.remaining_accounts.iter() {
+            accounts.push(if ai.is_writable {
+                AccountMeta::new(*ai.key, false)
+            } else {
+                AccountMeta::new_readonly(*ai.key, false)
+            });
+        }
+
+        let mut infos: Vec<AccountInfo<'info>> = vec![
+            ctx.accounts.position.to_account_info(),
+            ctx.accounts.lb_pair.to_account_info(),
+            ctx.accounts.bin_array_bitmap_extension.to_account_info(),
+            ctx.accounts.user_token_x.to_account_info(),
+            ctx.accounts.user_token_y.to_account_info(),
+            ctx.accounts.reserve_x.to_account_info(),
+            ctx.accounts.reserve_y.to_account_info(),
+            ctx.accounts.token_x_mint.to_account_info(),
+            ctx.accounts.token_y_mint.to_account_info(),
+            ctx.accounts.position_owner.to_account_info(),
+            ctx.accounts.token_x_program.to_account_info(),
+            ctx.accounts.token_y_program.to_account_info(),
+            ctx.accounts.event_authority.to_account_info(),
+            ctx.accounts.meteora_program.to_account_info(),
+        ];
+        for ai in ctx.remaining_accounts.iter() {
+            infos.push(ai.clone());
+        }
+
+        let ix = Instruction {
+            program_id: meteora::ID,
+            accounts,
+            data,
+        };
+        invoke_signed(&ix, &infos, signer_seeds)?;
+        Ok(())
+    }
+
     /// Remove liquidity over a bin range.
     pub fn remove_liquidity(
         ctx: Context<ManageLiquidity>,
@@ -336,6 +414,54 @@ pub struct ManageLiquidity<'info> {
     /// CHECK: bin array.
     #[account(mut)]
     pub bin_array_upper: UncheckedAccount<'info>,
+
+    #[account(seeds = [POSITION_OWNER_SEED, &nonce], bump)]
+    /// CHECK: PDA signer.
+    pub position_owner: UncheckedAccount<'info>,
+
+    /// CHECK: SPL Token or Token-2022 program.
+    pub token_x_program: UncheckedAccount<'info>,
+    /// CHECK: SPL Token or Token-2022 program.
+    pub token_y_program: UncheckedAccount<'info>,
+    /// CHECK: event authority.
+    pub event_authority: UncheckedAccount<'info>,
+    /// CHECK: address-checked.
+    #[account(address = meteora::ID)]
+    pub meteora_program: UncheckedAccount<'info>,
+}
+
+/// Accounts for `add_liquidity_v2`. Same shape as ManageLiquidity but the
+/// bin_array_lower / bin_array_upper accounts come via `remaining_accounts`,
+/// since Meteora's v2 entrypoint puts them there alongside transfer-hook
+/// accounts.
+#[derive(Accounts)]
+#[instruction(nonce: [u8; 32])]
+pub struct ManageLiquidityV2<'info> {
+    /// CHECK: validated by inner CPI.
+    #[account(mut)]
+    pub position: UncheckedAccount<'info>,
+    /// CHECK: validated by inner CPI.
+    #[account(mut)]
+    pub lb_pair: UncheckedAccount<'info>,
+    /// CHECK: optional bitmap extension; pass program id when not used.
+    #[account(mut)]
+    pub bin_array_bitmap_extension: UncheckedAccount<'info>,
+    /// CHECK: token account.
+    #[account(mut)]
+    pub user_token_x: UncheckedAccount<'info>,
+    /// CHECK: token account.
+    #[account(mut)]
+    pub user_token_y: UncheckedAccount<'info>,
+    /// CHECK: pool reserve.
+    #[account(mut)]
+    pub reserve_x: UncheckedAccount<'info>,
+    /// CHECK: pool reserve.
+    #[account(mut)]
+    pub reserve_y: UncheckedAccount<'info>,
+    /// CHECK: mint.
+    pub token_x_mint: UncheckedAccount<'info>,
+    /// CHECK: mint.
+    pub token_y_mint: UncheckedAccount<'info>,
 
     #[account(seeds = [POSITION_OWNER_SEED, &nonce], bump)]
     /// CHECK: PDA signer.

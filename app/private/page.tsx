@@ -53,7 +53,7 @@ export default function PrivatePage() {
 
     const unlock = useCallback(async () => {
         if (!signMessage) {
-            setError('Connected wallet does not support message signing');
+            setError('This wallet does not support message signing. Use Phantom or Solflare on desktop.');
             return;
         }
         try {

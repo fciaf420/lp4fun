@@ -335,6 +335,115 @@ function manageLiquidityKeys(nonce: Uint8Array, a: ManageLiquidityAccounts) {
     ];
 }
 
+/** Empty `RemainingAccountsInfo` — `slices` is a Vec of length 0 (4 LE bytes). */
+export function emptyRemainingAccountsInfo(): Buffer {
+    return Buffer.from([0, 0, 0, 0]);
+}
+
+/**
+ * Common accounts for the Token-2022 / v2 add_liquidity ix. Bin arrays
+ * are NOT in the named accounts list — they go through remaining_accounts
+ * alongside any transfer-hook accounts.
+ */
+export interface ManageLiquidityV2Accounts {
+    payer: PublicKey;
+    position: PublicKey;
+    lbPair: PublicKey;
+    binArrayBitmapExtension: PublicKey;
+    userTokenX: PublicKey;
+    userTokenY: PublicKey;
+    reserveX: PublicKey;
+    reserveY: PublicKey;
+    tokenXMint: PublicKey;
+    tokenYMint: PublicKey;
+    /** Token program for X — TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID. */
+    tokenXProgram: PublicKey;
+    tokenYProgram: PublicKey;
+    /** Bin array PDAs (writable). Always include both. */
+    binArrayLower: PublicKey;
+    binArrayUpper: PublicKey;
+    /** Optional transfer-hook accounts for tokenX (in canonical order). */
+    transferHookXAccounts?: PublicKey[];
+    /** Optional transfer-hook accounts for tokenY. */
+    transferHookYAccounts?: PublicKey[];
+}
+
+/**
+ * Build the wrapper's `add_liquidity_v2(nonce, liquidity_parameter,
+ * remaining_accounts_info)` instruction. Use this for pools whose mints
+ * are owned by Token-2022.
+ */
+export function buildAddLiquidityV2Ix(
+    args: { nonce: Uint8Array; liquidityParameter: Buffer },
+    a: ManageLiquidityV2Accounts
+): TransactionInstruction {
+    if (args.nonce.length !== 32) throw new Error('nonce must be 32 bytes');
+    const [positionOwner] = derivePositionOwner(args.nonce);
+    const eventAuthority = deriveMeteoraEventAuthority();
+
+    const xHook = a.transferHookXAccounts ?? [];
+    const yHook = a.transferHookYAccounts ?? [];
+
+    // RemainingAccountsInfo: only describes the transfer-hook segments.
+    // Bin arrays come first in remaining_accounts but are not described.
+    const slices: Array<{tag: number; len: number}> = [];
+    if (xHook.length > 0) slices.push({tag: 0, len: xHook.length}); // transferHookX
+    if (yHook.length > 0) slices.push({tag: 1, len: yHook.length}); // transferHookY
+
+    const slicesBuf = Buffer.alloc(4 + slices.length * 2);
+    slicesBuf.writeUInt32LE(slices.length, 0);
+    slices.forEach((s, i) => {
+        slicesBuf.writeUInt8(s.tag, 4 + i * 2);
+        slicesBuf.writeUInt8(s.len, 4 + i * 2 + 1);
+    });
+
+    // Wrapper expects nonce(32) + Vec<u8>(liquidity_parameter) + Vec<u8>(remaining_accounts_info)
+    const data = Buffer.alloc(
+        8 + 32
+        + 4 + args.liquidityParameter.length
+        + 4 + slicesBuf.length
+    );
+    let o = 0;
+    anchorSighash('add_liquidity_v2').copy(data, o); o += 8;
+    Buffer.from(args.nonce).copy(data, o); o += 32;
+    data.writeUInt32LE(args.liquidityParameter.length, o); o += 4;
+    args.liquidityParameter.copy(data, o); o += args.liquidityParameter.length;
+    data.writeUInt32LE(slicesBuf.length, o); o += 4;
+    slicesBuf.copy(data, o);
+
+    const remaining: AccountMetaInput[] = [
+        {pubkey: a.binArrayLower, isSigner: false, isWritable: true},
+        {pubkey: a.binArrayUpper, isSigner: false, isWritable: true},
+        ...xHook.map(k => ({pubkey: k, isSigner: false, isWritable: false})),
+        ...yHook.map(k => ({pubkey: k, isSigner: false, isWritable: false})),
+    ];
+
+    return new TransactionInstruction({
+        programId: PRIVATE_WRAP_PROGRAM_ID,
+        keys: [
+            {pubkey: a.payer, isSigner: true, isWritable: true},
+            {pubkey: positionOwner, isSigner: false, isWritable: false},
+            {pubkey: a.position, isSigner: false, isWritable: true},
+            {pubkey: a.lbPair, isSigner: false, isWritable: true},
+            {pubkey: a.binArrayBitmapExtension, isSigner: false, isWritable: true},
+            {pubkey: a.userTokenX, isSigner: false, isWritable: true},
+            {pubkey: a.userTokenY, isSigner: false, isWritable: true},
+            {pubkey: a.reserveX, isSigner: false, isWritable: true},
+            {pubkey: a.reserveY, isSigner: false, isWritable: true},
+            {pubkey: a.tokenXMint, isSigner: false, isWritable: false},
+            {pubkey: a.tokenYMint, isSigner: false, isWritable: false},
+            {pubkey: a.tokenXProgram, isSigner: false, isWritable: false},
+            {pubkey: a.tokenYProgram, isSigner: false, isWritable: false},
+            {pubkey: eventAuthority, isSigner: false, isWritable: false},
+            {pubkey: METEORA_DLMM_PROGRAM_ID, isSigner: false, isWritable: false},
+            ...remaining,
+        ],
+        data,
+    });
+}
+
+type AccountMetaInput = { pubkey: PublicKey; isSigner: boolean; isWritable: boolean };
+
 /**
  * `add_liquidity(nonce, liquidity_parameter)` — `liquidityParameter` is the
  * raw borsh-serialized `LiquidityParameterByStrategy` from the Meteora IDL,

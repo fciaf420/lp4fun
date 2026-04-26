@@ -33,6 +33,7 @@ import {
     deriveNonceFromSignature,
     METEORA_DLMM_PROGRAM_ID,
 } from '@/app/utils/privateWrap';
+import {formatError} from '@/app/utils/errorFormat';
 
 const SIG_STORAGE_KEY = 'privateWrapMasterSig';
 const METEORA_PROGRAM_ID_MAINNET = new PublicKey(LBCLMM_PROGRAM_IDS['mainnet-beta']);
@@ -194,7 +195,7 @@ export default function PositionActions({index, position, lbPair, onChanged}: Pr
             setStatus(`Fees claimed: ${sig}`);
             onChanged?.();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(formatError(e));
         } finally {
             setBusy(false);
         }
@@ -271,7 +272,7 @@ export default function PositionActions({index, position, lbPair, onChanged}: Pr
             setStatus(`Done: ${sig}`);
             onChanged?.();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(formatError(e));
         } finally {
             setBusy(false);
         }

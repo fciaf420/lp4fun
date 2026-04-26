@@ -18,6 +18,7 @@ import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {useConnection, useWallet} from '@solana/wallet-adapter-react';
 import {LAMPORTS_PER_SOL, Keypair} from '@solana/web3.js';
 import {deriveEphemeralKeypair} from '@/app/utils/privateWrap';
+import {formatError} from '@/app/utils/errorFormat';
 import {
     buildEncryptionService,
     getShieldedSolBalance,
@@ -25,6 +26,21 @@ import {
     shieldSol,
     unshieldSol,
 } from '@/app/utils/privacyCash';
+
+type Stage =
+    | 'idle'
+    | 'deriving_key'
+    | 'generating_proof'
+    | 'submitting'
+    | 'confirming';
+
+const STAGE_LABEL: Record<Stage, string> = {
+    idle: '',
+    deriving_key: 'Sign request: deriving encryption key…',
+    generating_proof: 'Generating ZK proof (10–15s)…',
+    submitting: 'Submitting transaction…',
+    confirming: 'Awaiting confirmation…',
+};
 
 const SIG_STORAGE_KEY = 'privateWrapMasterSig';
 
@@ -42,9 +58,10 @@ export default function ShieldForm() {
     const [balances, setBalances] = useState<Balances>({walletSol: 0, ephemeralSol: 0, shieldedSol: 0});
     const [shieldAmount, setShieldAmount] = useState('0.05');
     const [unshieldAmount, setUnshieldAmount] = useState('0.05');
-    const [busy, setBusy] = useState(false);
+    const [stage, setStage] = useState<Stage>('idle');
     const [status, setStatus] = useState('');
     const [error, setError] = useState('');
+    const busy = stage !== 'idle';
 
     useEffect(() => {
         const sigHex = localStorage.getItem(SIG_STORAGE_KEY);
@@ -92,8 +109,12 @@ export default function ShieldForm() {
     }, [refresh]);
 
     const shield = useCallback(async () => {
-        if (!publicKey || !signMessage || !signTransaction) {
+        if (!publicKey) {
             setError('Connect wallet');
+            return;
+        }
+        if (!signMessage || !signTransaction) {
+            setError('This wallet does not support message + transaction signing. Use Phantom or Solflare.');
             return;
         }
         const lamports = Math.floor(parseFloat(shieldAmount) * LAMPORTS_PER_SOL);
@@ -101,12 +122,12 @@ export default function ShieldForm() {
             setError('Invalid amount');
             return;
         }
-        setBusy(true);
+        setStatus('');
         setError('');
-        setStatus('Deriving encryption key (sign request)...');
         try {
+            setStage('deriving_key');
             const svc = await buildEncryptionService(signMessage);
-            setStatus('Generating ZK proof + shielding (this takes ~10s)...');
+            setStage('generating_proof');
             const res = await shieldSol({
                 connection,
                 walletPubkey: publicKey,
@@ -114,18 +135,23 @@ export default function ShieldForm() {
                 signTransaction,
                 lamports,
             });
+            setStage('confirming');
             setStatus(`Shielded. Tx: ${typeof res === 'string' ? res : 'submitted'}`);
             await refresh();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(formatError(e));
         } finally {
-            setBusy(false);
+            setStage('idle');
         }
     }, [connection, publicKey, signMessage, signTransaction, shieldAmount, refresh]);
 
     const unshield = useCallback(async () => {
-        if (!publicKey || !signMessage || !ephemeral) {
+        if (!publicKey || !ephemeral) {
             setError('Connect wallet');
+            return;
+        }
+        if (!signMessage) {
+            setError('This wallet does not support message signing. Use Phantom or Solflare.');
             return;
         }
         const lamports = Math.floor(parseFloat(unshieldAmount) * LAMPORTS_PER_SOL);
@@ -133,12 +159,12 @@ export default function ShieldForm() {
             setError('Invalid amount');
             return;
         }
-        setBusy(true);
+        setStatus('');
         setError('');
-        setStatus('Deriving encryption key (sign request)...');
         try {
+            setStage('deriving_key');
             const svc = await buildEncryptionService(signMessage);
-            setStatus('Generating ZK proof + relaying withdraw (this takes ~10s)...');
+            setStage('generating_proof');
             const res = await unshieldSol({
                 connection,
                 walletPubkey: publicKey,
@@ -146,12 +172,13 @@ export default function ShieldForm() {
                 recipient: ephemeral.publicKey,
                 lamports,
             });
+            setStage('submitting');
             setStatus(`Unshielded to ephemeral. Sig: ${typeof res === 'string' ? res : 'submitted'}`);
             await refresh();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(formatError(e));
         } finally {
-            setBusy(false);
+            setStage('idle');
         }
     }, [connection, publicKey, signMessage, ephemeral, unshieldAmount, refresh]);
 
@@ -240,6 +267,12 @@ export default function ShieldForm() {
                 history; PrivacyCash&apos;s relayer signs the on-chain tx.
             </p>
 
+            {busy && (
+                <div className="flex items-center gap-2 text-xs">
+                    <span className="loading loading-spinner loading-xs"/>
+                    <span>{STAGE_LABEL[stage]}</span>
+                </div>
+            )}
             {status && <p className="text-success text-xs break-all">{status}</p>}
             {error && <p className="text-error text-xs break-all">{error}</p>}
         </div>

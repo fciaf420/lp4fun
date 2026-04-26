@@ -20,6 +20,7 @@ import {
     derivePositionOwner,
     NONCE_DERIVATION_MESSAGE,
 } from '@/app/utils/privateWrap';
+import {formatError} from '@/app/utils/errorFormat';
 
 /** Extract an LB pair pubkey from either a raw base58 address or a Meteora app URL. */
 function parsePoolInput(raw: string): PublicKey | null {
@@ -194,7 +195,7 @@ export default function CreatePositionForm({onCreated}: Props) {
             );
             onCreated?.(positionKp.publicKey);
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(formatError(e));
         } finally {
             setBusy(false);
         }

@@ -30,10 +30,14 @@ import {
     getMint,
     NATIVE_MINT,
     TOKEN_PROGRAM_ID,
+    TOKEN_2022_PROGRAM_ID,
+    ExtensionType,
+    getExtensionTypes,
     createSyncNativeInstruction,
 } from '@solana/spl-token';
 import {
     buildAddLiquidityIx,
+    buildAddLiquidityV2Ix,
     buildInitializeBinArrayIx,
     deriveEphemeralKeypair,
     deriveNonceFromSignature,
@@ -42,6 +46,7 @@ import {
     METEORA_DLMM_PROGRAM_ID,
     StrategyTypeOnChain,
 } from '@/app/utils/privateWrap';
+import {formatError} from '@/app/utils/errorFormat';
 
 interface Props {
     /** Index of the position (corresponds to nonce derivation index). */
@@ -106,11 +111,36 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             const upperBinId = positionInfo.upperBinId as number;
             const activeId = dlmm.lbPair.activeId;
 
+            // Detect Token program owner per mint (legacy SPL vs Token-2022).
+            const [mintXAcc, mintYAcc] = await Promise.all([
+                connection.getAccountInfo(dlmm.lbPair.tokenXMint),
+                connection.getAccountInfo(dlmm.lbPair.tokenYMint),
+            ]);
+            if (!mintXAcc || !mintYAcc) throw new Error('Mint account not found on chain');
+            const tokenXProgram = mintXAcc.owner;
+            const tokenYProgram = mintYAcc.owner;
+            const isV2 =
+                tokenXProgram.equals(TOKEN_2022_PROGRAM_ID) ||
+                tokenYProgram.equals(TOKEN_2022_PROGRAM_ID);
+
             // Token decimals — needed to convert UI amounts to base units.
             const [mintXInfo, mintYInfo] = await Promise.all([
-                getMint(connection, dlmm.lbPair.tokenXMint),
-                getMint(connection, dlmm.lbPair.tokenYMint),
+                getMint(connection, dlmm.lbPair.tokenXMint, undefined, tokenXProgram),
+                getMint(connection, dlmm.lbPair.tokenYMint, undefined, tokenYProgram),
             ]);
+
+            // Transfer hooks aren't supported in v1 of this wrapper. Fail
+            // loudly rather than silently producing a broken tx.
+            if (isV2) {
+                const xExt = getExtensionTypes(mintXAcc.data);
+                const yExt = getExtensionTypes(mintYAcc.data);
+                if (xExt.includes(ExtensionType.TransferHook) ||
+                    yExt.includes(ExtensionType.TransferHook)) {
+                    throw new Error(
+                        'This pool uses Token-2022 with a Transfer Hook extension, which is not yet supported.'
+                    );
+                }
+            }
 
             const lowerArrayIndex = binIdToBinArrayIndex(new BN(lowerBinId));
             const upperArrayIndex = binIdToBinArrayIndex(new BN(upperBinId));
@@ -155,21 +185,26 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
 
             // ATAs and funding all live on the ephemeral, not the connected
             // wallet. Connected wallet must NOT appear on this transaction.
-            const userTokenX = getAssociatedTokenAddressSync(tokenXMint, ephemeral.publicKey);
-            const userTokenY = getAssociatedTokenAddressSync(tokenYMint, ephemeral.publicKey);
+            // ATA derivation respects the per-mint token program.
+            const userTokenX = getAssociatedTokenAddressSync(
+                tokenXMint, ephemeral.publicKey, true, tokenXProgram
+            );
+            const userTokenY = getAssociatedTokenAddressSync(
+                tokenYMint, ephemeral.publicKey, true, tokenYProgram
+            );
 
             const pre: Transaction = new Transaction();
             for (const ix of initBinArrayIxs) pre.add(ix);
             const ataXInfo = await connection.getAccountInfo(userTokenX);
             if (!ataXInfo) {
                 pre.add(createAssociatedTokenAccountIdempotentInstruction(
-                    ephemeral.publicKey, userTokenX, ephemeral.publicKey, tokenXMint
+                    ephemeral.publicKey, userTokenX, ephemeral.publicKey, tokenXMint, tokenXProgram
                 ));
             }
             const ataYInfo = await connection.getAccountInfo(userTokenY);
             if (!ataYInfo) {
                 pre.add(createAssociatedTokenAccountIdempotentInstruction(
-                    ephemeral.publicKey, userTokenY, ephemeral.publicKey, tokenYMint
+                    ephemeral.publicKey, userTokenY, ephemeral.publicKey, tokenYMint, tokenYProgram
                 ));
             }
 
@@ -206,25 +241,45 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
                 },
             });
 
-            const ix = buildAddLiquidityIx(
-                {nonce, liquidityParameter},
-                {
-                    payer: ephemeral.publicKey,
-                    position,
-                    lbPair,
-                    binArrayBitmapExtension: bitmapExtAccount,
-                    userTokenX,
-                    userTokenY,
-                    reserveX,
-                    reserveY,
-                    tokenXMint,
-                    tokenYMint,
-                    binArrayLower,
-                    binArrayUpper,
-                    tokenXProgram: TOKEN_PROGRAM_ID,
-                    tokenYProgram: TOKEN_PROGRAM_ID,
-                }
-            );
+            const ix = isV2
+                ? buildAddLiquidityV2Ix(
+                    {nonce, liquidityParameter},
+                    {
+                        payer: ephemeral.publicKey,
+                        position,
+                        lbPair,
+                        binArrayBitmapExtension: bitmapExtAccount,
+                        userTokenX,
+                        userTokenY,
+                        reserveX,
+                        reserveY,
+                        tokenXMint,
+                        tokenYMint,
+                        tokenXProgram,
+                        tokenYProgram,
+                        binArrayLower,
+                        binArrayUpper,
+                    }
+                )
+                : buildAddLiquidityIx(
+                    {nonce, liquidityParameter},
+                    {
+                        payer: ephemeral.publicKey,
+                        position,
+                        lbPair,
+                        binArrayBitmapExtension: bitmapExtAccount,
+                        userTokenX,
+                        userTokenY,
+                        reserveX,
+                        reserveY,
+                        tokenXMint,
+                        tokenYMint,
+                        binArrayLower,
+                        binArrayUpper,
+                        tokenXProgram: TOKEN_PROGRAM_ID,
+                        tokenYProgram: TOKEN_PROGRAM_ID,
+                    }
+                );
 
             const tx = pre.add(ix);
             tx.feePayer = ephemeral.publicKey;
@@ -243,7 +298,7 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             setStatus(`Liquidity added: ${sig}`);
             onDone?.();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(formatError(e));
         } finally {
             setBusy(false);
         }
