@@ -1,222 +1,225 @@
 // app/private/page.tsx
 //
-// Manages the user's local list of nonces (each one corresponds to a
-// position-owner PDA of dlmm-private-wrap) and lists every DLMM Position
-// account currently held under those PDAs.
-//
-// Nothing here signs a transaction or creates a position — that requires a
-// wallet-adapter integration that lp4fun doesn't have yet. This page is the
-// analytics counterpart to the wrapper program: it lets you see your own
-// wrapped positions even though they aren't owned by your wallet.
+// Private DLMM position dashboard. Connects a wallet, unlocks a master
+// signature, and lets the user open new wrapped positions or browse
+// existing ones (derived from the signature, so a wallet alone is enough
+// to recover them on any device).
 
 'use client';
 
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import Link from 'next/link';
-import {Connection, PublicKey} from '@solana/web3.js';
+import {useConnection, useWallet} from '@solana/wallet-adapter-react';
+import {WalletMultiButton} from '@solana/wallet-adapter-react-ui';
+import {PublicKey} from '@solana/web3.js';
+import CreatePositionForm from './CreatePositionForm';
 import {
+    deriveNonceFromSignature,
     derivePositionOwner,
     findPositionsForNonces,
-    newNonce,
-    nonceFromHex,
-    nonceToHex,
+    NONCE_DERIVATION_MESSAGE,
 } from '@/app/utils/privateWrap';
-import {getDefaultConnection} from '@/app/utils/cachedConnection';
 
-const STORAGE_KEY = 'privateWrapNonces';
+const SIG_STORAGE_KEY = 'privateWrapMasterSig';
+const INDEX_STORAGE_KEY = 'privateWrapNextIndex';
 
-interface NonceEntry {
-    label: string;
-    hex: string;
-}
-
-interface FoundPosition {
-    nonce: NonceEntry;
+interface PositionRow {
+    index: number;
     owner: PublicKey;
     positions: PublicKey[];
 }
 
 export default function PrivatePage() {
-    const [entries, setEntries] = useState<NonceEntry[]>([]);
-    const [label, setLabel] = useState('');
-    const [importHex, setImportHex] = useState('');
-    const [importError, setImportError] = useState('');
-    const [results, setResults] = useState<FoundPosition[]>([]);
+    const {connection} = useConnection();
+    const {connected, signMessage, publicKey} = useWallet();
+
+    const [masterSig, setMasterSig] = useState<Uint8Array | null>(null);
+    const [nextIndex, setNextIndex] = useState<number>(0);
+
+    const [rows, setRows] = useState<PositionRow[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
-    const connection: Connection = useMemo(() => getDefaultConnection(), []);
-
     useEffect(() => {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-            try {
-                setEntries(JSON.parse(raw));
-            } catch {
-                // ignore bad localStorage
-            }
-        }
+        const sigHex = localStorage.getItem(SIG_STORAGE_KEY);
+        if (sigHex) setMasterSig(new Uint8Array(Buffer.from(sigHex, 'hex')));
+        const idx = localStorage.getItem(INDEX_STORAGE_KEY);
+        if (idx) setNextIndex(parseInt(idx, 10) || 0);
     }, []);
 
-    function persist(next: NonceEntry[]) {
-        setEntries(next);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    }
-
-    function addGenerated() {
-        const trimmed = label.trim() || `position-${entries.length + 1}`;
-        const hex = nonceToHex(newNonce());
-        persist([...entries, {label: trimmed, hex}]);
-        setLabel('');
-    }
-
-    function importNonce() {
-        try {
-            // validate
-            nonceFromHex(importHex.trim());
-            const trimmed = label.trim() || `imported-${entries.length + 1}`;
-            persist([...entries, {label: trimmed, hex: importHex.trim()}]);
-            setImportHex('');
-            setLabel('');
-            setImportError('');
-        } catch (e) {
-            setImportError(e instanceof Error ? e.message : String(e));
+    const unlock = useCallback(async () => {
+        if (!signMessage) {
+            setError('Connected wallet does not support message signing');
+            return;
         }
-    }
+        try {
+            const sig = await signMessage(new TextEncoder().encode(NONCE_DERIVATION_MESSAGE));
+            setMasterSig(sig);
+            localStorage.setItem(SIG_STORAGE_KEY, Buffer.from(sig).toString('hex'));
+            setError('');
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        }
+    }, [signMessage]);
 
-    function removeAt(idx: number) {
-        if (!confirm('Remove this nonce? You will lose access to the position unless you have it backed up.')) return;
-        const next = [...entries];
-        next.splice(idx, 1);
-        persist(next);
-    }
+    const knownNonces = useMemo(() => {
+        if (!masterSig) return [];
+        const out: { index: number; nonce: Uint8Array }[] = [];
+        // Look one past nextIndex so a freshly-opened position shows up even
+        // if the local counter is one stale.
+        const horizon = Math.max(nextIndex + 1, 1);
+        for (let i = 0; i < horizon; i++) {
+            out.push({index: i, nonce: deriveNonceFromSignature(masterSig, i)});
+        }
+        return out;
+    }, [masterSig, nextIndex]);
 
-    async function lookup() {
+    const refresh = useCallback(async () => {
+        if (knownNonces.length === 0) return;
         setLoading(true);
         setError('');
-        setResults([]);
         try {
             const found = await findPositionsForNonces(
                 connection,
-                entries.map(e => nonceFromHex(e.hex))
+                knownNonces.map(n => n.nonce)
             );
-            setResults(
-                found.map((f, i) => ({
-                    nonce: entries[i],
-                    owner: f.owner,
-                    positions: f.positions,
-                }))
-            );
+            setRows(found.map((f, i) => ({
+                index: knownNonces[i].index,
+                owner: f.owner,
+                positions: f.positions,
+            })));
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         } finally {
             setLoading(false);
         }
-    }
+    }, [connection, knownNonces]);
 
     return (
-        <div className="max-w-3xl mx-auto p-4 space-y-6">
+        <div className="max-w-3xl mx-auto p-4 space-y-6 w-full">
             <div>
                 <h1 className="text-2xl font-bold">Private DLMM positions</h1>
                 <p className="text-sm opacity-70 mt-1">
-                    Positions wrapped by <code>dlmm-private-wrap</code> are owned by a PDA
-                    derived from a 32-byte nonce. Anyone who knows the nonce controls the
-                    position — these never leave your browser.
+                    Each of your positions is owned by a per-position PDA derived from a
+                    one-time signature. Bots watching your wallet see nothing — only the
+                    PDA appears on-chain.
                 </p>
             </div>
 
-            <div className="bg-base-200 rounded-box p-4 space-y-3">
-                <h2 className="font-semibold">Add a nonce</h2>
-                <input
-                    type="text"
-                    className="input input-bordered w-full"
-                    placeholder="Label (optional)"
-                    value={label}
-                    onChange={e => setLabel(e.target.value)}
-                />
-                <div className="flex gap-2">
-                    <button onClick={addGenerated} className="btn btn-primary flex-1">
-                        Generate new nonce
+            {!connected && (
+                <div className="bg-base-200 rounded-box p-4 flex items-center justify-between">
+                    <span className="text-sm">Connect a wallet to begin.</span>
+                    <WalletMultiButton style={{height: '32px', fontSize: '12px'}}/>
+                </div>
+            )}
+
+            {connected && !masterSig && (
+                <div className="bg-base-200 rounded-box p-4 space-y-2">
+                    <h2 className="font-semibold">Unlock</h2>
+                    <p className="text-sm opacity-70">
+                        Sign a deterministic message once. The signature never leaves your
+                        browser; it just derives the keys for your private positions. The
+                        same wallet on any device recovers the same positions.
+                    </p>
+                    <p className="text-xs opacity-60 font-mono break-all">
+                        message: &quot;{NONCE_DERIVATION_MESSAGE}&quot;
+                    </p>
+                    <button onClick={unlock} className="btn btn-primary btn-sm">
+                        Sign unlock message
                     </button>
                 </div>
-                <div className="divider text-xs opacity-50">or import existing</div>
-                <input
-                    type="text"
-                    className="input input-bordered w-full font-mono text-xs"
-                    placeholder="64 hex chars"
-                    value={importHex}
-                    onChange={e => setImportHex(e.target.value)}
-                />
-                <button onClick={importNonce} className="btn btn-secondary w-full">
-                    Import nonce
-                </button>
-                {importError && <p className="text-error text-sm">{importError}</p>}
-            </div>
+            )}
 
-            <div className="bg-base-200 rounded-box p-4 space-y-3">
-                <div className="flex justify-between items-center">
-                    <h2 className="font-semibold">Stored nonces ({entries.length})</h2>
-                    <button
-                        onClick={lookup}
-                        className="btn btn-accent btn-sm"
-                        disabled={loading || entries.length === 0}
-                    >
-                        {loading ? <span className="loading loading-spinner loading-xs"/> : 'Find positions'}
-                    </button>
-                </div>
-                {entries.length === 0 ? (
-                    <p className="text-sm opacity-60">No nonces stored yet.</p>
-                ) : (
-                    <ul className="space-y-2">
-                        {entries.map((e, i) => {
-                            const [owner] = derivePositionOwner(nonceFromHex(e.hex));
-                            return (
-                                <li key={i} className="flex items-start gap-3 text-sm">
-                                    <div className="flex-1 min-w-0">
-                                        <div className="font-medium">{e.label}</div>
-                                        <div className="text-xs opacity-60 truncate font-mono">
-                                            nonce: {e.hex}
-                                        </div>
-                                        <div className="text-xs opacity-60 truncate font-mono">
-                                            owner: {owner.toBase58()}
-                                        </div>
-                                    </div>
-                                    <button onClick={() => removeAt(i)} className="btn btn-ghost btn-xs">
-                                        remove
-                                    </button>
-                                </li>
-                            );
-                        })}
-                    </ul>
-                )}
-                {error && <p className="text-error text-sm">{error}</p>}
-            </div>
+            {connected && masterSig && (
+                <>
+                    <CreatePositionForm
+                        onCreated={() => {
+                            // bump local cursor and re-list
+                            const next = nextIndex + 1;
+                            setNextIndex(next);
+                            localStorage.setItem(INDEX_STORAGE_KEY, String(next));
+                            void refresh();
+                        }}
+                    />
 
-            {results.length > 0 && (
-                <div className="bg-base-200 rounded-box p-4 space-y-3">
-                    <h2 className="font-semibold">Wrapped positions</h2>
-                    {results.map((r, i) => (
-                        <div key={i} className="border-b border-base-300 last:border-b-0 pb-2 last:pb-0">
-                            <div className="text-sm font-medium">{r.nonce.label}</div>
-                            {r.positions.length === 0 ? (
-                                <div className="text-xs opacity-60">no positions yet</div>
-                            ) : (
-                                <ul className="text-xs font-mono space-y-1 mt-1">
-                                    {r.positions.map(p => (
-                                        <li key={p.toBase58()}>
-                                            <Link
-                                                href={`/position/${p.toBase58()}`}
-                                                className="link link-primary"
-                                            >
-                                                {p.toBase58()}
-                                            </Link>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
+                    <div className="bg-base-200 rounded-box p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                            <h2 className="font-semibold">Your positions</h2>
+                            <button
+                                onClick={refresh}
+                                disabled={loading}
+                                className="btn btn-sm btn-ghost"
+                            >
+                                {loading ? <span className="loading loading-spinner loading-xs"/> : 'Refresh'}
+                            </button>
                         </div>
-                    ))}
-                </div>
+
+                        {publicKey && (
+                            <p className="text-xs opacity-60 font-mono break-all">
+                                wallet: {publicKey.toBase58()}
+                            </p>
+                        )}
+
+                        {rows.length === 0 ? (
+                            <p className="text-sm opacity-60">
+                                No positions yet — or click Refresh.
+                            </p>
+                        ) : (
+                            <ul className="space-y-3">
+                                {rows.map(r => (
+                                    <li key={r.index} className="text-sm">
+                                        <div className="flex items-baseline justify-between">
+                                            <span className="font-medium">position #{r.index}</span>
+                                            <span className="text-xs opacity-60 font-mono truncate max-w-[60%]">
+                                                pda: {r.owner.toBase58()}
+                                            </span>
+                                        </div>
+                                        {r.positions.length === 0 ? (
+                                            <div className="text-xs opacity-50">no on-chain position yet</div>
+                                        ) : (
+                                            <ul className="text-xs font-mono space-y-1 mt-1 ml-2">
+                                                {r.positions.map(p => (
+                                                    <li key={p.toBase58()}>
+                                                        <Link
+                                                            href={`/position/${p.toBase58()}`}
+                                                            className="link link-primary"
+                                                        >
+                                                            {p.toBase58()}
+                                                        </Link>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+
+                        {error && <p className="text-error text-xs break-all">{error}</p>}
+                    </div>
+
+                    <details className="bg-base-200 rounded-box p-4">
+                        <summary className="cursor-pointer text-sm font-semibold">
+                            Recovery / privacy notes
+                        </summary>
+                        <ul className="text-xs opacity-70 mt-2 space-y-1 list-disc list-inside">
+                            <li>
+                                Your master signature lives in localStorage. Wiping it is
+                                fine — sign the same message again to recover.
+                            </li>
+                            <li>
+                                Positions are owned by per-position PDAs, not your wallet.
+                                Bots watching your wallet see nothing, but anyone watching
+                                this program will still see the PDAs operating. Privacy
+                                comes from the anonymity set of users on the program.
+                            </li>
+                            <li>
+                                When you withdraw / claim fees, route the tokens to a fresh
+                                account, not your main wallet, or you re-link everything.
+                            </li>
+                        </ul>
+                    </details>
+                </>
             )}
         </div>
     );

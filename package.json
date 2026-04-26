@@ -23,6 +23,7 @@
     "@vercel/analytics": "^1.5.0",
     "@vercel/speed-insights": "^1.2.0",
     "bn.js": "^5.2.2",
+    "bs58": "^6.0.0",
     "daisyui": "^5.0.43",
     "date-fns": "^4.1.0",
     "next": "15.3.3",

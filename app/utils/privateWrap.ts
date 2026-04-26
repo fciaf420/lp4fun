@@ -46,6 +46,34 @@ export function nonceFromHex(hex: string): Uint8Array {
     return new Uint8Array(Buffer.from(clean, 'hex'));
 }
 
+/** The fixed message a user signs once to derive their master seed. */
+export const NONCE_DERIVATION_MESSAGE =
+    'lp4fun-private-v1: derive my private DLMM position keys';
+
+/**
+ * Derive a deterministic 32-byte nonce from a wallet signature + index.
+ *
+ * The wallet signs `NONCE_DERIVATION_MESSAGE` once. The resulting signature
+ * acts as a master seed. Per-position nonces are `sha256(seed || index_le)`.
+ *
+ * Properties:
+ *   - Unguessable to anyone who doesn't have the wallet (sig is unforgeable).
+ *   - Recoverable: signing the same message yields the same seed yields the
+ *     same nonces, so wiping localStorage doesn't lose access — the user
+ *     just needs their wallet to recover their positions.
+ *   - Unlinkable: from outside, the PDA looks random.
+ */
+export function deriveNonceFromSignature(
+    signature: Uint8Array,
+    index: number
+): Uint8Array {
+    const buf = Buffer.alloc(signature.length + 4);
+    Buffer.from(signature).copy(buf, 0);
+    buf.writeUInt32LE(index >>> 0, signature.length);
+    const hex = utils.sha256.hash(new Uint8Array(buf));
+    return new Uint8Array(Buffer.from(hex, 'hex'));
+}
+
 /** Derive the position-owner PDA: seeds = [b"pos", nonce]. */
 export function derivePositionOwner(nonce: Uint8Array): [PublicKey, number] {
     return PublicKey.findProgramAddressSync(
