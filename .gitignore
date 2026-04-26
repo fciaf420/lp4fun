@@ -37,3 +37,11 @@ next-env.d.ts
 
 # jetbrains
 .idea
+
+# rust / anchor
+target
+.anchor
+test-ledger
+
+# privacycash bundled assets (copied via postinstall from node_modules)
+public/privacycash/
