@@ -27,6 +27,7 @@ const SIG_STORAGE_KEY = 'privateWrapMasterSig';
 import {
     createAssociatedTokenAccountIdempotentInstruction,
     getAssociatedTokenAddressSync,
+    getMint,
     NATIVE_MINT,
     TOKEN_PROGRAM_ID,
     createSyncNativeInstruction,
@@ -37,6 +38,7 @@ import {
     deriveEphemeralKeypair,
     deriveNonceFromSignature,
     encodeLiquidityParameterByStrategy,
+    humanToBaseUnits,
     METEORA_DLMM_PROGRAM_ID,
     StrategyTypeOnChain,
 } from '@/app/utils/privateWrap';
@@ -104,6 +106,12 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             const upperBinId = positionInfo.upperBinId as number;
             const activeId = dlmm.lbPair.activeId;
 
+            // Token decimals — needed to convert UI amounts to base units.
+            const [mintXInfo, mintYInfo] = await Promise.all([
+                getMint(connection, dlmm.lbPair.tokenXMint),
+                getMint(connection, dlmm.lbPair.tokenYMint),
+            ]);
+
             const lowerArrayIndex = binIdToBinArrayIndex(new BN(lowerBinId));
             const upperArrayIndex = binIdToBinArrayIndex(new BN(upperBinId));
 
@@ -165,8 +173,8 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
                 ));
             }
 
-            const amountXBig = BigInt(amountX || '0');
-            const amountYBig = BigInt(amountY || '0');
+            const amountXBig = humanToBaseUnits(amountX || '0', mintXInfo.decimals);
+            const amountYBig = humanToBaseUnits(amountY || '0', mintYInfo.decimals);
             const ZERO = BigInt(0);
 
             if (tokenXMint.equals(NATIVE_MINT) && amountXBig > ZERO) {
@@ -249,17 +257,19 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             <div className="text-xs opacity-70">Add liquidity to position #{index}</div>
             <div className="grid grid-cols-2 gap-2 text-xs">
                 <label>
-                    <span className="opacity-70">amount X (raw)</span>
+                    <span className="opacity-70">amount X (e.g. 1.5)</span>
                     <input
                         className="input input-bordered input-xs w-full mt-1"
+                        placeholder="0"
                         value={amountX}
                         onChange={e => setAmountX(e.target.value)}
                     />
                 </label>
                 <label>
-                    <span className="opacity-70">amount Y (raw)</span>
+                    <span className="opacity-70">amount Y (e.g. 1.5)</span>
                     <input
                         className="input input-bordered input-xs w-full mt-1"
+                        placeholder="0"
                         value={amountY}
                         onChange={e => setAmountY(e.target.value)}
                     />

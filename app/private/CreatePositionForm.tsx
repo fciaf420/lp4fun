@@ -12,6 +12,7 @@ import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {useConnection, useWallet} from '@solana/wallet-adapter-react';
 import {WalletMultiButton} from '@solana/wallet-adapter-react-ui';
 import {Keypair, PublicKey, Transaction} from '@solana/web3.js';
+import DLMM from '@meteora-ag/dlmm';
 import {
     buildInitPositionIx,
     deriveEphemeralKeypair,
@@ -19,6 +20,27 @@ import {
     derivePositionOwner,
     NONCE_DERIVATION_MESSAGE,
 } from '@/app/utils/privateWrap';
+
+/** Extract an LB pair pubkey from either a raw base58 address or a Meteora app URL. */
+function parsePoolInput(raw: string): PublicKey | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    // try raw pubkey
+    try {
+        return new PublicKey(trimmed);
+    } catch { /* fall through */ }
+    // try URL: https://app.meteora.ag/dlmm/<addr> or similar
+    try {
+        const u = new URL(trimmed);
+        const segs = u.pathname.split('/').filter(Boolean);
+        for (let i = segs.length - 1; i >= 0; i--) {
+            try {
+                return new PublicKey(segs[i]);
+            } catch { /* try next */ }
+        }
+    } catch { /* not a URL */ }
+    return null;
+}
 
 const SIG_STORAGE_KEY = 'privateWrapMasterSig';
 const INDEX_STORAGE_KEY = 'privateWrapNextIndex';
@@ -38,9 +60,47 @@ export default function CreatePositionForm({onCreated}: Props) {
     const [lowerBinId, setLowerBinId] = useState('-34');
     const [width, setWidth] = useState('69');
 
+    const [activeBinId, setActiveBinId] = useState<number | null>(null);
+    const [loadingPool, setLoadingPool] = useState(false);
+
     const [busy, setBusy] = useState(false);
     const [status, setStatus] = useState<string>('');
     const [error, setError] = useState<string>('');
+
+    const lbPairKey = useMemo(() => parsePoolInput(lbPair), [lbPair]);
+
+    // When the user pastes a valid pool, fetch its active bin id so we can
+    // suggest sensible bin range presets.
+    useEffect(() => {
+        if (!lbPairKey) {
+            setActiveBinId(null);
+            return;
+        }
+        let cancelled = false;
+        setLoadingPool(true);
+        DLMM.create(connection, lbPairKey)
+            .then(d => {
+                if (!cancelled) setActiveBinId(d.lbPair.activeId);
+            })
+            .catch(() => {
+                if (!cancelled) setActiveBinId(null);
+            })
+            .finally(() => {
+                if (!cancelled) setLoadingPool(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [connection, lbPairKey]);
+
+    /** Set lower/width so the position spans `radius` bins on each side of active. */
+    function applyRangeAroundActive(radius: number) {
+        if (activeBinId == null) return;
+        const lower = activeBinId - radius;
+        const w = radius * 2 + 1;
+        setLowerBinId(String(lower));
+        setWidth(String(w));
+    }
 
     useEffect(() => {
         const sigHex = localStorage.getItem(SIG_STORAGE_KEY);
@@ -80,16 +140,8 @@ export default function CreatePositionForm({onCreated}: Props) {
             setError('Sign the unlock message first');
             return;
         }
-        if (!lbPair) {
-            setError('Enter the LB pair address');
-            return;
-        }
-
-        let lbPairKey: PublicKey;
-        try {
-            lbPairKey = new PublicKey(lbPair);
-        } catch {
-            setError('Invalid LB pair address');
+        if (!lbPairKey) {
+            setError('Paste an LB pair pubkey or a Meteora pool URL');
             return;
         }
         const lower = parseInt(lowerBinId, 10);
@@ -146,7 +198,7 @@ export default function CreatePositionForm({onCreated}: Props) {
         } finally {
             setBusy(false);
         }
-    }, [connection, publicKey, masterSig, ephemeral, nextIndex, lbPair, lowerBinId, width, onCreated]);
+    }, [connection, publicKey, masterSig, ephemeral, nextIndex, lbPairKey, lowerBinId, width, onCreated]);
 
     return (
         <div className="bg-base-200 rounded-box p-4 space-y-3">
@@ -175,15 +227,54 @@ export default function CreatePositionForm({onCreated}: Props) {
                     </div>
 
                     <label className="block">
-                        <span className="opacity-70">LB pair address</span>
+                        <span className="opacity-70">LB pair address or Meteora pool URL</span>
                         <input
                             type="text"
                             className="input input-bordered input-sm w-full font-mono text-xs mt-1"
-                            placeholder="Meteora LB pair pubkey"
+                            placeholder="pubkey or https://app.meteora.ag/dlmm/..."
                             value={lbPair}
                             onChange={e => setLbPair(e.target.value)}
                         />
+                        {lbPair && !lbPairKey && (
+                            <span className="text-xs text-error">unrecognized pubkey or URL</span>
+                        )}
+                        {lbPairKey && (
+                            <span className="text-xs opacity-60">
+                                {loadingPool
+                                    ? 'loading pool…'
+                                    : activeBinId != null
+                                        ? `active bin: ${activeBinId}`
+                                        : 'pool not found'}
+                            </span>
+                        )}
                     </label>
+
+                    {activeBinId != null && (
+                        <div className="flex flex-wrap gap-1 text-xs">
+                            <span className="opacity-70 self-center">range presets:</span>
+                            <button
+                                type="button"
+                                onClick={() => applyRangeAroundActive(34)}
+                                className="btn btn-xs"
+                            >
+                                ±34 bins
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => applyRangeAroundActive(17)}
+                                className="btn btn-xs"
+                            >
+                                ±17 bins
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => applyRangeAroundActive(5)}
+                                className="btn btn-xs"
+                            >
+                                ±5 bins
+                            </button>
+                        </div>
+                    )}
 
                     <div className="grid grid-cols-2 gap-2">
                         <label className="block">

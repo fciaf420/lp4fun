@@ -160,6 +160,33 @@ export function buildInitPositionIx(
     });
 }
 
+// ----- Amount helpers -----
+
+/**
+ * Convert a human-readable amount string (e.g. "1.5") into base units
+ * (BigInt) using the mint's decimals. Throws on non-numeric input.
+ */
+export function humanToBaseUnits(amount: string, decimals: number): bigint {
+    const trimmed = amount.trim();
+    if (trimmed === '' || !/^\d+(\.\d+)?$/.test(trimmed)) {
+        throw new Error(`invalid amount: "${amount}"`);
+    }
+    const [whole, frac = ''] = trimmed.split('.');
+    if (frac.length > decimals) {
+        throw new Error(`too many decimals (max ${decimals})`);
+    }
+    const padded = (frac + '0'.repeat(decimals)).slice(0, decimals);
+    return BigInt(whole + padded);
+}
+
+/** Inverse of humanToBaseUnits — for display only. */
+export function baseUnitsToHuman(amount: bigint, decimals: number): string {
+    const s = amount.toString().padStart(decimals + 1, '0');
+    const whole = s.slice(0, s.length - decimals);
+    const frac = s.slice(s.length - decimals).replace(/0+$/, '');
+    return frac ? `${whole}.${frac}` : whole;
+}
+
 // ----- Direct Meteora ix builders (used outside the wrapper) -----
 
 /**
