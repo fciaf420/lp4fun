@@ -36,6 +36,7 @@
     "rpc-websockets": "9.1.1"
   },
   "devDependencies": {
+    "@types/bn.js": "^5.1.6",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",

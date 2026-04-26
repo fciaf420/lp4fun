@@ -15,7 +15,8 @@
 // persisting.
 
 import {Connection, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, TransactionInstruction} from '@solana/web3.js';
-import {utils} from '@coral-xyz/anchor';
+import {sha256} from '@noble/hashes/sha2';
+import bs58 from 'bs58';
 
 // Replace with the actual deployed program id once the program is built.
 export const PRIVATE_WRAP_PROGRAM_ID = new PublicKey(
@@ -70,8 +71,7 @@ export function deriveNonceFromSignature(
     const buf = Buffer.alloc(signature.length + 4);
     Buffer.from(signature).copy(buf, 0);
     buf.writeUInt32LE(index >>> 0, signature.length);
-    const hex = utils.sha256.hash(new Uint8Array(buf));
-    return new Uint8Array(Buffer.from(hex, 'hex'));
+    return sha256(new Uint8Array(buf));
 }
 
 /** Derive the position-owner PDA: seeds = [b"pos", nonce]. */
@@ -92,7 +92,7 @@ export function deriveMeteoraEventAuthority(): PublicKey {
 
 /** 8-byte Anchor sighash for `global:<name>`. */
 function anchorSighash(name: string): Buffer {
-    return Buffer.from(utils.sha256.hash(`global:${name}`), 'hex').subarray(0, 8);
+    return Buffer.from(sha256(new TextEncoder().encode(`global:${name}`))).subarray(0, 8);
 }
 
 /** Encodes the `init_position(nonce, lower_bin_id, width)` ix data. */
@@ -139,6 +139,73 @@ export function buildInitPositionIx(
         ],
         data: encodeInitPositionData(args.nonce, args.lowerBinId, args.width),
     });
+}
+
+// ----- Strategy + LiquidityParameterByStrategy borsh helpers -----
+
+/**
+ * Meteora's StrategyType enum, in the exact on-chain order.
+ * Verified against @meteora-ag/dlmm 1.7.5 IDL.
+ */
+export enum StrategyTypeOnChain {
+    SpotOneSide = 0,
+    CurveOneSide = 1,
+    BidAskOneSide = 2,
+    SpotBalanced = 3,
+    CurveBalanced = 4,
+    BidAskBalanced = 5,
+    SpotImBalanced = 6,
+    CurveImBalanced = 7,
+    BidAskImBalanced = 8,
+}
+
+export interface StrategyParametersInput {
+    minBinId: number;
+    maxBinId: number;
+    strategyType: StrategyTypeOnChain;
+    /** Defaults to 64 zero bytes if not provided. */
+    parameteres?: Uint8Array;
+}
+
+export interface LiquidityParameterByStrategyInput {
+    amountX: bigint;
+    amountY: bigint;
+    activeId: number;
+    maxActiveBinSlippage: number;
+    strategy: StrategyParametersInput;
+}
+
+/**
+ * Borsh-serialize a Meteora `LiquidityParameterByStrategy`. Layout:
+ *   amountX: u64
+ *   amountY: u64
+ *   activeId: i32
+ *   maxActiveBinSlippage: i32
+ *   strategyParameters:
+ *     minBinId: i32
+ *     maxBinId: i32
+ *     strategyType: u8 (enum tag)
+ *     parameteres: [u8; 64]
+ *
+ * Total: 97 bytes.
+ */
+export function encodeLiquidityParameterByStrategy(
+    p: LiquidityParameterByStrategyInput
+): Buffer {
+    const buf = Buffer.alloc(97);
+    buf.writeBigUInt64LE(p.amountX, 0);
+    buf.writeBigUInt64LE(p.amountY, 8);
+    buf.writeInt32LE(p.activeId, 16);
+    buf.writeInt32LE(p.maxActiveBinSlippage, 20);
+    buf.writeInt32LE(p.strategy.minBinId, 24);
+    buf.writeInt32LE(p.strategy.maxBinId, 28);
+    buf.writeUInt8(p.strategy.strategyType, 32);
+    const params = p.strategy.parameteres ?? new Uint8Array(64);
+    if (params.length !== 64) {
+        throw new Error('strategy.parameteres must be exactly 64 bytes');
+    }
+    Buffer.from(params).copy(buf, 33);
+    return buf;
 }
 
 // ----- Liquidity / claim / close -----
@@ -256,7 +323,7 @@ export function buildClaimFeesIx(
         keys: [
             {pubkey: a.payer, isSigner: true, isWritable: true},
             {pubkey: positionOwner, isSigner: false, isWritable: false},
-            {pubkey: a.lbPair, isSigner: false, isWritable: false},
+            {pubkey: a.lbPair, isSigner: false, isWritable: true},
             {pubkey: a.position, isSigner: false, isWritable: true},
             {pubkey: a.binArrayLower, isSigner: false, isWritable: true},
             {pubkey: a.binArrayUpper, isSigner: false, isWritable: true},
@@ -300,7 +367,7 @@ export function buildClosePositionIx(
             {pubkey: a.payer, isSigner: true, isWritable: true},
             {pubkey: positionOwner, isSigner: false, isWritable: false},
             {pubkey: a.position, isSigner: false, isWritable: true},
-            {pubkey: a.lbPair, isSigner: false, isWritable: false},
+            {pubkey: a.lbPair, isSigner: false, isWritable: true},
             {pubkey: a.binArrayLower, isSigner: false, isWritable: true},
             {pubkey: a.binArrayUpper, isSigner: false, isWritable: true},
             {pubkey: a.rentReceiver, isSigner: false, isWritable: true},
@@ -313,28 +380,43 @@ export function buildClosePositionIx(
 
 // ----- Lookup -----
 
+export interface FoundPosition {
+    pubkey: PublicKey;
+    lbPair: PublicKey;
+}
+
 /**
  * Given a list of nonces, returns the DLMM Position pubkeys held under each
- * one's PDA. Used by the /private page to list a user's wrapped positions.
+ * one's PDA, along with each position's lbPair (parsed from the account
+ * data).
  */
 export async function findPositionsForNonces(
     connection: Connection,
     nonces: Uint8Array[]
-): Promise<Array<{ nonce: Uint8Array; owner: PublicKey; positions: PublicKey[] }>> {
-    // The Meteora Position account stores `owner: Pubkey` at a fixed offset.
-    // For the v2 layout that's offset 8 (anchor disc) + 32 (lb_pair) = 40.
-    // Verify against your installed @meteora-ag/dlmm if the layout shifts.
+): Promise<Array<{ nonce: Uint8Array; owner: PublicKey; positions: FoundPosition[] }>> {
+    // PositionV2 layout (verified against @meteora-ag/dlmm 1.7.5):
+    //   [0..8]   anchor discriminator [117,176,212,199,245,180,133,182]
+    //   [8..40]  lb_pair (pubkey)
+    //   [40..72] owner (pubkey)
+    const POSITION_V2_DISCRIMINATOR = bs58.encode(
+        Uint8Array.from([117, 176, 212, 199, 245, 180, 133, 182])
+    );
     const OWNER_OFFSET = 40;
 
-    const out: Array<{ nonce: Uint8Array; owner: PublicKey; positions: PublicKey[] }> = [];
+    const out: Array<{ nonce: Uint8Array; owner: PublicKey; positions: FoundPosition[] }> = [];
     for (const nonce of nonces) {
         const [owner] = derivePositionOwner(nonce);
         const accounts = await connection.getProgramAccounts(METEORA_DLMM_PROGRAM_ID, {
             filters: [
+                {memcmp: {offset: 0, bytes: POSITION_V2_DISCRIMINATOR}},
                 {memcmp: {offset: OWNER_OFFSET, bytes: owner.toBase58()}},
             ],
         });
-        out.push({nonce, owner, positions: accounts.map(a => a.pubkey)});
+        const positions: FoundPosition[] = accounts.map(a => ({
+            pubkey: a.pubkey,
+            lbPair: new PublicKey(a.account.data.subarray(8, 40)),
+        }));
+        out.push({nonce, owner, positions});
     }
     return out;
 }

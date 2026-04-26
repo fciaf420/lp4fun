@@ -37,3 +37,8 @@ next-env.d.ts
 
 # jetbrains
 .idea
+
+# rust / anchor
+target
+.anchor
+test-ledger

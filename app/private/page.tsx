@@ -13,10 +13,12 @@ import {useConnection, useWallet} from '@solana/wallet-adapter-react';
 import {WalletMultiButton} from '@solana/wallet-adapter-react-ui';
 import {PublicKey} from '@solana/web3.js';
 import CreatePositionForm from './CreatePositionForm';
+import AddLiquidityForm from './AddLiquidityForm';
 import {
     deriveNonceFromSignature,
     derivePositionOwner,
     findPositionsForNonces,
+    FoundPosition,
     NONCE_DERIVATION_MESSAGE,
 } from '@/app/utils/privateWrap';
 
@@ -26,7 +28,7 @@ const INDEX_STORAGE_KEY = 'privateWrapNextIndex';
 interface PositionRow {
     index: number;
     owner: PublicKey;
-    positions: PublicKey[];
+    positions: FoundPosition[];
 }
 
 export default function PrivatePage() {
@@ -177,15 +179,21 @@ export default function PrivatePage() {
                                         {r.positions.length === 0 ? (
                                             <div className="text-xs opacity-50">no on-chain position yet</div>
                                         ) : (
-                                            <ul className="text-xs font-mono space-y-1 mt-1 ml-2">
+                                            <ul className="text-xs font-mono space-y-2 mt-1 ml-2">
                                                 {r.positions.map(p => (
-                                                    <li key={p.toBase58()}>
+                                                    <li key={p.pubkey.toBase58()}>
                                                         <Link
-                                                            href={`/position/${p.toBase58()}`}
+                                                            href={`/position/${p.pubkey.toBase58()}`}
                                                             className="link link-primary"
                                                         >
-                                                            {p.toBase58()}
+                                                            {p.pubkey.toBase58()}
                                                         </Link>
+                                                        <AddLiquidityForm
+                                                            index={r.index}
+                                                            position={p.pubkey}
+                                                            lbPair={p.lbPair}
+                                                            onDone={refresh}
+                                                        />
                                                     </li>
                                                 ))}
                                             </ul>

@@ -21,7 +21,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{instruction::Instruction, program::invoke_signed};
 
-declare_id!("PrvWrap11111111111111111111111111111111111");
+declare_id!("11111111111111111111111111111111");
 
 /// Meteora DLMM program id (`lb_clmm`).
 pub mod meteora {
@@ -187,7 +187,7 @@ pub mod dlmm_private_wrap {
         let ix = Instruction {
             program_id: meteora::ID,
             accounts: vec![
-                AccountMeta::new_readonly(ctx.accounts.lb_pair.key(), false),
+                AccountMeta::new(ctx.accounts.lb_pair.key(), false),
                 AccountMeta::new(ctx.accounts.position.key(), false),
                 AccountMeta::new(ctx.accounts.bin_array_lower.key(), false),
                 AccountMeta::new(ctx.accounts.bin_array_upper.key(), false),
@@ -240,7 +240,7 @@ pub mod dlmm_private_wrap {
             program_id: meteora::ID,
             accounts: vec![
                 AccountMeta::new(ctx.accounts.position.key(), false),
-                AccountMeta::new_readonly(ctx.accounts.lb_pair.key(), false),
+                AccountMeta::new(ctx.accounts.lb_pair.key(), false),
                 AccountMeta::new(ctx.accounts.bin_array_lower.key(), false),
                 AccountMeta::new(ctx.accounts.bin_array_upper.key(), false),
                 AccountMeta::new_readonly(ctx.accounts.position_owner.key(), true),
@@ -356,6 +356,7 @@ pub struct ManageLiquidity<'info> {
 #[instruction(nonce: [u8; 32])]
 pub struct ClaimFees<'info> {
     /// CHECK: validated by inner CPI.
+    #[account(mut)]
     pub lb_pair: UncheckedAccount<'info>,
     /// CHECK: validated by inner CPI.
     #[account(mut)]
@@ -403,6 +404,7 @@ pub struct ClosePosition<'info> {
     #[account(mut)]
     pub position: UncheckedAccount<'info>,
     /// CHECK: validated by inner CPI.
+    #[account(mut)]
     pub lb_pair: UncheckedAccount<'info>,
     /// CHECK: bin array.
     #[account(mut)]
