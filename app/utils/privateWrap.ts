@@ -160,6 +160,43 @@ export function buildInitPositionIx(
     });
 }
 
+// ----- Direct Meteora ix builders (used outside the wrapper) -----
+
+/**
+ * Build Meteora's `initializeBinArray(index)` instruction. Anyone can call
+ * this — bin arrays are pool-level state, not user-specific. We invoke it
+ * directly (not through our wrapper) since the wrapper adds no privacy
+ * benefit here: the ephemeral signs either way.
+ *
+ * Accounts (verified against @meteora-ag/dlmm 1.7.5 IDL):
+ *   lbPair (ro), binArray (mut PDA), funder (mut, signer), systemProgram
+ *
+ * binArray PDA seeds: [b"bin_array", lbPair, i64 index little-endian]
+ */
+export function buildInitializeBinArrayIx(args: {
+    funder: PublicKey;
+    lbPair: PublicKey;
+    binArray: PublicKey;
+    /** Bin array index (signed 64-bit). Use SDK's binIdToBinArrayIndex. */
+    index: bigint;
+}): TransactionInstruction {
+    // Meteora discriminator from IDL: [35, 86, 19, 185, 78, 212, 75, 211]
+    const data = Buffer.alloc(8 + 8);
+    Buffer.from([35, 86, 19, 185, 78, 212, 75, 211]).copy(data, 0);
+    data.writeBigInt64LE(args.index, 8);
+
+    return new TransactionInstruction({
+        programId: METEORA_DLMM_PROGRAM_ID,
+        keys: [
+            {pubkey: args.lbPair, isSigner: false, isWritable: false},
+            {pubkey: args.binArray, isSigner: false, isWritable: true},
+            {pubkey: args.funder, isSigner: true, isWritable: true},
+            {pubkey: SystemProgram.programId, isSigner: false, isWritable: false},
+        ],
+        data,
+    });
+}
+
 // ----- Strategy + LiquidityParameterByStrategy borsh helpers -----
 
 /**

@@ -33,6 +33,7 @@ import {
 } from '@solana/spl-token';
 import {
     buildAddLiquidityIx,
+    buildInitializeBinArrayIx,
     deriveEphemeralKeypair,
     deriveNonceFromSignature,
     encodeLiquidityParameterByStrategy,
@@ -111,6 +112,34 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             const [binArrayUpper] = deriveBinArray(lbPair, upperArrayIndex, programId);
             const [bitmapExt] = deriveBinArrayBitmapExtension(lbPair, programId);
 
+            // Pre-init bin arrays if they don't exist on-chain yet. First user
+            // to LP in a fresh bin range pays this rent (~0.057 SOL each).
+            const [lowerInfo, upperInfo, bitmapInfo] = await Promise.all([
+                connection.getAccountInfo(binArrayLower),
+                connection.getAccountInfo(binArrayUpper),
+                connection.getAccountInfo(bitmapExt),
+            ]);
+            const initBinArrayIxs = [];
+            if (!lowerInfo) {
+                initBinArrayIxs.push(buildInitializeBinArrayIx({
+                    funder: ephemeral.publicKey,
+                    lbPair,
+                    binArray: binArrayLower,
+                    index: BigInt(lowerArrayIndex.toString()),
+                }));
+            }
+            if (!upperInfo && !lowerArrayIndex.eq(upperArrayIndex)) {
+                initBinArrayIxs.push(buildInitializeBinArrayIx({
+                    funder: ephemeral.publicKey,
+                    lbPair,
+                    binArray: binArrayUpper,
+                    index: BigInt(upperArrayIndex.toString()),
+                }));
+            }
+            // If the pool has no bitmap extension account on-chain, Meteora
+            // accepts the program id as a placeholder for the optional slot.
+            const bitmapExtAccount = bitmapInfo ? bitmapExt : METEORA_DLMM_PROGRAM_ID;
+
             const tokenXMint: PublicKey = dlmm.lbPair.tokenXMint;
             const tokenYMint: PublicKey = dlmm.lbPair.tokenYMint;
             const reserveX: PublicKey = dlmm.lbPair.reserveX;
@@ -122,6 +151,7 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             const userTokenY = getAssociatedTokenAddressSync(tokenYMint, ephemeral.publicKey);
 
             const pre: Transaction = new Transaction();
+            for (const ix of initBinArrayIxs) pre.add(ix);
             const ataXInfo = await connection.getAccountInfo(userTokenX);
             if (!ataXInfo) {
                 pre.add(createAssociatedTokenAccountIdempotentInstruction(
@@ -174,7 +204,7 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
                     payer: ephemeral.publicKey,
                     position,
                     lbPair,
-                    binArrayBitmapExtension: bitmapExt,
+                    binArrayBitmapExtension: bitmapExtAccount,
                     userTokenX,
                     userTokenY,
                     reserveX,
