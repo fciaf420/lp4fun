@@ -14,6 +14,7 @@ import {WalletMultiButton} from '@solana/wallet-adapter-react-ui';
 import {PublicKey} from '@solana/web3.js';
 import CreatePositionForm from './CreatePositionForm';
 import AddLiquidityForm from './AddLiquidityForm';
+import ShieldForm from './ShieldForm';
 import {
     deriveNonceFromSignature,
     derivePositionOwner,
@@ -134,6 +135,8 @@ export default function PrivatePage() {
 
             {connected && masterSig && (
                 <>
+                    <ShieldForm/>
+
                     <CreatePositionForm
                         onCreated={() => {
                             // bump local cursor and re-list

@@ -42,3 +42,6 @@ next-env.d.ts
 target
 .anchor
 test-ledger
+
+# privacycash bundled assets (copied via postinstall from node_modules)
+public/privacycash/

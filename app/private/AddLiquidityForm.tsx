@@ -12,7 +12,7 @@
 
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {useConnection, useWallet} from '@solana/wallet-adapter-react';
-import {PublicKey, SystemProgram, Transaction} from '@solana/web3.js';
+import {Keypair, PublicKey, SystemProgram, Transaction} from '@solana/web3.js';
 import BN from 'bn.js';
 import DLMM, {
     binIdToBinArrayIndex,
@@ -22,6 +22,8 @@ import DLMM, {
 } from '@meteora-ag/dlmm';
 
 const METEORA_PROGRAM_ID_MAINNET = new PublicKey(LBCLMM_PROGRAM_IDS['mainnet-beta']);
+
+const SIG_STORAGE_KEY = 'privateWrapMasterSig';
 import {
     createAssociatedTokenAccountIdempotentInstruction,
     getAssociatedTokenAddressSync,
@@ -31,13 +33,12 @@ import {
 } from '@solana/spl-token';
 import {
     buildAddLiquidityIx,
+    deriveEphemeralKeypair,
     deriveNonceFromSignature,
     encodeLiquidityParameterByStrategy,
     METEORA_DLMM_PROGRAM_ID,
     StrategyTypeOnChain,
 } from '@/app/utils/privateWrap';
-
-const SIG_STORAGE_KEY = 'privateWrapMasterSig';
 
 interface Props {
     /** Index of the position (corresponds to nonce derivation index). */
@@ -51,7 +52,7 @@ interface Props {
 
 export default function AddLiquidityForm({index, position, lbPair, onDone}: Props) {
     const {connection} = useConnection();
-    const {publicKey, sendTransaction} = useWallet();
+    const {publicKey} = useWallet();
 
     const [masterSig, setMasterSig] = useState<Uint8Array | null>(null);
     const [amountX, setAmountX] = useState('0');
@@ -74,14 +75,19 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
         [masterSig, index]
     );
 
+    const ephemeral: Keypair | null = useMemo(
+        () => (masterSig ? deriveEphemeralKeypair(masterSig) : null),
+        [masterSig]
+    );
+
     const submit = useCallback(async () => {
         setError('');
         setStatus('');
-        if (!publicKey || !sendTransaction) {
+        if (!publicKey) {
             setError('Connect wallet');
             return;
         }
-        if (!nonce) {
+        if (!nonce || !ephemeral) {
             setError('Sign unlock message first');
             return;
         }
@@ -110,21 +116,22 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             const reserveX: PublicKey = dlmm.lbPair.reserveX;
             const reserveY: PublicKey = dlmm.lbPair.reserveY;
 
-            const userTokenX = getAssociatedTokenAddressSync(tokenXMint, publicKey);
-            const userTokenY = getAssociatedTokenAddressSync(tokenYMint, publicKey);
+            // ATAs and funding all live on the ephemeral, not the connected
+            // wallet. Connected wallet must NOT appear on this transaction.
+            const userTokenX = getAssociatedTokenAddressSync(tokenXMint, ephemeral.publicKey);
+            const userTokenY = getAssociatedTokenAddressSync(tokenYMint, ephemeral.publicKey);
 
-            // Pre-ixs: ensure ATAs exist; wrap SOL if a side is native.
             const pre: Transaction = new Transaction();
             const ataXInfo = await connection.getAccountInfo(userTokenX);
             if (!ataXInfo) {
                 pre.add(createAssociatedTokenAccountIdempotentInstruction(
-                    publicKey, userTokenX, publicKey, tokenXMint
+                    ephemeral.publicKey, userTokenX, ephemeral.publicKey, tokenXMint
                 ));
             }
             const ataYInfo = await connection.getAccountInfo(userTokenY);
             if (!ataYInfo) {
                 pre.add(createAssociatedTokenAccountIdempotentInstruction(
-                    publicKey, userTokenY, publicKey, tokenYMint
+                    ephemeral.publicKey, userTokenY, ephemeral.publicKey, tokenYMint
                 ));
             }
 
@@ -134,7 +141,7 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
 
             if (tokenXMint.equals(NATIVE_MINT) && amountXBig > ZERO) {
                 pre.add(SystemProgram.transfer({
-                    fromPubkey: publicKey,
+                    fromPubkey: ephemeral.publicKey,
                     toPubkey: userTokenX,
                     lamports: Number(amountXBig),
                 }));
@@ -142,7 +149,7 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             }
             if (tokenYMint.equals(NATIVE_MINT) && amountYBig > ZERO) {
                 pre.add(SystemProgram.transfer({
-                    fromPubkey: publicKey,
+                    fromPubkey: ephemeral.publicKey,
                     toPubkey: userTokenY,
                     lamports: Number(amountYBig),
                 }));
@@ -164,7 +171,7 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             const ix = buildAddLiquidityIx(
                 {nonce, liquidityParameter},
                 {
-                    payer: publicKey,
+                    payer: ephemeral.publicKey,
                     position,
                     lbPair,
                     binArrayBitmapExtension: bitmapExt,
@@ -182,12 +189,13 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             );
 
             const tx = pre.add(ix);
-            tx.feePayer = publicKey;
+            tx.feePayer = ephemeral.publicKey;
             const {blockhash, lastValidBlockHeight} = await connection.getLatestBlockhash();
             tx.recentBlockhash = blockhash;
+            tx.sign(ephemeral);
 
-            setStatus('Awaiting wallet signature...');
-            const sig = await sendTransaction(tx, connection);
+            setStatus('Submitting (signed by ephemeral)...');
+            const sig = await connection.sendRawTransaction(tx.serialize());
             setStatus(`Submitted: ${sig}. Confirming...`);
             const conf = await connection.confirmTransaction(
                 {signature: sig, blockhash, lastValidBlockHeight},
@@ -202,7 +210,7 @@ export default function AddLiquidityForm({index, position, lbPair, onDone}: Prop
             setBusy(false);
         }
     }, [
-        connection, publicKey, sendTransaction, nonce, position, lbPair,
+        connection, publicKey, ephemeral, nonce, position, lbPair,
         amountX, amountY, strategyType, maxSlippage, onDone,
     ]);
 

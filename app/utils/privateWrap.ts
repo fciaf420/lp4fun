@@ -14,7 +14,7 @@
 // for production, encrypt the nonce list with a wallet-signed key before
 // persisting.
 
-import {Connection, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, TransactionInstruction} from '@solana/web3.js';
+import {Connection, Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, TransactionInstruction} from '@solana/web3.js';
 import {sha256} from '@noble/hashes/sha2';
 import bs58 from 'bs58';
 
@@ -72,6 +72,25 @@ export function deriveNonceFromSignature(
     Buffer.from(signature).copy(buf, 0);
     buf.writeUInt32LE(index >>> 0, signature.length);
     return sha256(new Uint8Array(buf));
+}
+
+const EPHEMERAL_DOMAIN = new TextEncoder().encode('lp4fun-ephemeral-v1');
+
+/**
+ * Derive a deterministic ephemeral signing keypair from the unlock signature.
+ * The connected wallet never signs any LP transaction — this keypair does.
+ * Recoverable: signing the unlock message again gives the same keypair.
+ *
+ * Privacy property: the on-chain link from connected wallet to LP activity
+ * is the funding tx (connected → ephemeral). That tx is broken cryptographically
+ * by routing through PrivacyCash; see app/utils/privacyCash.ts.
+ */
+export function deriveEphemeralKeypair(masterSig: Uint8Array): Keypair {
+    const buf = new Uint8Array(masterSig.length + EPHEMERAL_DOMAIN.length);
+    buf.set(masterSig, 0);
+    buf.set(EPHEMERAL_DOMAIN, masterSig.length);
+    const seed = sha256(buf);
+    return Keypair.fromSeed(seed.slice(0, 32));
 }
 
 /** Derive the position-owner PDA: seeds = [b"pos", nonce]. */

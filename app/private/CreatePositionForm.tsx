@@ -8,12 +8,13 @@
 
 'use client';
 
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {useConnection, useWallet} from '@solana/wallet-adapter-react';
 import {WalletMultiButton} from '@solana/wallet-adapter-react-ui';
 import {Keypair, PublicKey, Transaction} from '@solana/web3.js';
 import {
     buildInitPositionIx,
+    deriveEphemeralKeypair,
     deriveNonceFromSignature,
     derivePositionOwner,
     NONCE_DERIVATION_MESSAGE,
@@ -28,7 +29,7 @@ interface Props {
 
 export default function CreatePositionForm({onCreated}: Props) {
     const {connection} = useConnection();
-    const {publicKey, signMessage, sendTransaction, connected} = useWallet();
+    const {publicKey, signMessage, connected} = useWallet();
 
     const [masterSig, setMasterSig] = useState<Uint8Array | null>(null);
     const [nextIndex, setNextIndex] = useState<number>(0);
@@ -63,14 +64,19 @@ export default function CreatePositionForm({onCreated}: Props) {
         }
     }, [signMessage]);
 
+    const ephemeral: Keypair | null = useMemo(
+        () => (masterSig ? deriveEphemeralKeypair(masterSig) : null),
+        [masterSig]
+    );
+
     const submit = useCallback(async () => {
         setError('');
         setStatus('');
-        if (!publicKey || !sendTransaction) {
+        if (!publicKey) {
             setError('Connect a wallet first');
             return;
         }
-        if (!masterSig) {
+        if (!masterSig || !ephemeral) {
             setError('Sign the unlock message first');
             return;
         }
@@ -98,24 +104,25 @@ export default function CreatePositionForm({onCreated}: Props) {
             const nonce = deriveNonceFromSignature(masterSig, nextIndex);
             const positionKp = Keypair.generate();
 
+            // Ephemeral pays the rent and signs the wrapper call. The
+            // connected wallet does not appear on this transaction.
             const ix = buildInitPositionIx(
                 {nonce, lowerBinId: lower, width: w},
                 {
-                    payer: publicKey,
+                    payer: ephemeral.publicKey,
                     position: positionKp.publicKey,
                     lbPair: lbPairKey,
                 }
             );
 
             const tx = new Transaction().add(ix);
-            tx.feePayer = publicKey;
+            tx.feePayer = ephemeral.publicKey;
             const {blockhash, lastValidBlockHeight} = await connection.getLatestBlockhash();
             tx.recentBlockhash = blockhash;
-            tx.partialSign(positionKp);
+            tx.sign(ephemeral, positionKp);
 
-            setStatus('Awaiting wallet signature...');
-            const sig = await sendTransaction(tx, connection, {
-                signers: [],
+            setStatus('Submitting (signed by ephemeral)...');
+            const sig = await connection.sendRawTransaction(tx.serialize(), {
                 skipPreflight: false,
             });
 
@@ -139,7 +146,7 @@ export default function CreatePositionForm({onCreated}: Props) {
         } finally {
             setBusy(false);
         }
-    }, [connection, publicKey, sendTransaction, masterSig, nextIndex, lbPair, lowerBinId, width, onCreated]);
+    }, [connection, publicKey, masterSig, ephemeral, nextIndex, lbPair, lowerBinId, width, onCreated]);
 
     return (
         <div className="bg-base-200 rounded-box p-4 space-y-3">
